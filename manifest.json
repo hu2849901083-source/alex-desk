@@ -1,0 +1,9 @@
+{
+  "id": "alex-desk",
+  "name": "Alex Desk",
+  "version": "1.8.0",
+  "minAppVersion": "1.7.2",
+  "description": "A restrained, attention-first home dashboard for Obsidian.",
+  "author": "Alex",
+  "isDesktopOnly": false
+}

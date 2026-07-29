@@ -1,0 +1,7 @@
+data.json
+.DS_Store
+Thumbs.db
+*.log
+.idea/
+.vscode/
+release-staging/
