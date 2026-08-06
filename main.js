@@ -21,15 +21,22 @@ const DEFAULT_SETTINGS = {
   heroImages: "",
   carouselEnabled: true,
   carouselSeconds: 8,
+  heroAutoPan: true,
+  heroImagePositions: {},
   colorMode: "auto",
   palette: "reading",
   insightsTitle: "知识概览",
   insightMetrics: "notes,characters,monthUpdates,activeDays",
   todayTitle: "当下",
-  todayExcerptLines: 5,
-  todayExcerptCharacters: 180,
   heatmapTitle: "文字热力图",
   heatmapWeeks: 26,
+  rediscoverySoundEnabled: true,
+  rediscoverySoundVolume: 0.22,
+  birthDate: "",
+  lifeProgressTitle: "人生进度",
+  lifeProgressMark: "人",
+  lifeProgressMarkColor: "",
+  lifeProgressMarkFont: "PingFang SC",
   dailyFolder: "今日随笔",
   clippingsFolder: "Clippings",
   recentLimit: 4,
@@ -102,6 +109,15 @@ class AlexDeskView extends ItemView {
     this.heroIndex = 0;
     this.carouselTimer = 0;
     this.insightDetailKey = "";
+    this.rediscoveryIndex = 0;
+    this.optionWheelFrame = 0;
+    this.optionWheelTimer = 0;
+    this.wheelLastTick = 0;
+    this.wheelAudioContext = null;
+    this.lifeWheelFrame = 0;
+    this.lifeWheelTimer = 0;
+    this.calendarLayer = null;
+    this.calendarOutsideHandler = null;
   }
 
   getViewType() { return VIEW_TYPE; }
@@ -117,6 +133,16 @@ class AlexDeskView extends ItemView {
   async onClose() {
     this.plugin.views.delete(this);
     window.clearInterval(this.carouselTimer);
+    window.cancelAnimationFrame(this.optionWheelFrame);
+    window.clearTimeout(this.optionWheelTimer);
+    window.cancelAnimationFrame(this.lifeWheelFrame);
+    window.clearTimeout(this.lifeWheelTimer);
+    if (this.calendarOutsideHandler) document.removeEventListener("pointerdown", this.calendarOutsideHandler, true);
+    this.calendarOutsideHandler = null;
+    this.calendarLayer?.remove();
+    this.calendarLayer = null;
+    this.wheelAudioContext?.close?.().catch(() => {});
+    this.wheelAudioContext = null;
   }
 
   effectiveMode() {
@@ -135,6 +161,16 @@ class AlexDeskView extends ItemView {
   async render() {
     const id = ++this.renderId;
     window.clearInterval(this.carouselTimer);
+    window.cancelAnimationFrame(this.optionWheelFrame);
+    window.clearTimeout(this.optionWheelTimer);
+    window.cancelAnimationFrame(this.lifeWheelFrame);
+    window.clearTimeout(this.lifeWheelTimer);
+    if (this.calendarOutsideHandler) document.removeEventListener("pointerdown", this.calendarOutsideHandler, true);
+    this.calendarOutsideHandler = null;
+    this.calendarLayer?.remove();
+    this.calendarLayer = null;
+    this.optionWheelFrame = 0;
+    this.lifeWheelFrame = 0;
     this.applyAppearance();
     const root = this.contentEl;
     root.empty();
@@ -210,6 +246,7 @@ class AlexDeskView extends ItemView {
 
   renderHero(parent, data) {
     const hero = el(parent, "section", "ad-hero");
+    hero.toggleClass("is-auto-pan", this.plugin.settings.heroAutoPan !== false);
     this.heroImages = data.heroImages;
     if (data.heroImages.length) {
       this.heroIndex = ((this.heroIndex % data.heroImages.length) + data.heroImages.length) % data.heroImages.length;
@@ -220,12 +257,28 @@ class AlexDeskView extends ItemView {
         const image = el(slide, "img", "ad-hero-image");
         image.src = item.url;
         image.alt = item.name;
+        image.draggable = false;
+        const savedPosition = Number(this.plugin.settings.heroImagePositions?.[item.path]);
+        if (Number.isFinite(savedPosition)) {
+          image.style.setProperty("--ad-hero-pan", `${savedPosition}%`);
+          slide.addClass("is-user-positioned");
+        }
+        this.bindHeroPan(slide, image, item);
+        const panHint = el(slide, "span", "ad-pan-hint");
+        const panIcon = el(panHint, "i");
+        setIcon(panIcon, "grip-horizontal");
+        el(panHint, "span", "", "上下拖动取景");
         const plate = el(slide, "span", "ad-image-plate");
         el(plate, "time", "", item.date);
         const source = el(plate, "span");
         setIcon(source, item.noteFile ? "file-text" : "image");
-        el(source, "strong", "", item.noteFile?.basename || item.name);
-        slide.addEventListener("click", () => {
+        const sourceName = el(source, "strong", "", item.noteFile?.basename || item.name);
+        sourceName.setAttribute("title", item.noteFile?.basename || item.name);
+        slide.addEventListener("click", (event) => {
+          if (slide.dataset.wasDragged === "true") {
+            event.preventDefault();
+            return;
+          }
           if (item.noteFile) this.plugin.openFile(item.noteFile);
           else new Notice("仓库中暂未找到引用这张图片的笔记。");
         });
@@ -268,6 +321,59 @@ class AlexDeskView extends ItemView {
       const seconds = Math.max(3, Math.min(60, Number(this.plugin.settings.carouselSeconds) || 8));
       this.carouselTimer = window.setInterval(() => this.changeHero(1), seconds * 1000);
     }
+  }
+
+  bindHeroPan(slide, image, item) {
+    let drag = null;
+    const clamp = (value) => Math.max(-6, Math.min(6, value));
+    const currentPosition = () => {
+      const inline = parseFloat(image.style.getPropertyValue("--ad-hero-pan"));
+      return Number.isFinite(inline) ? inline : 0;
+    };
+    const applyPosition = (value) => {
+      const next = clamp(value);
+      image.style.setProperty("--ad-hero-pan", `${next}%`);
+      return next;
+    };
+    const finish = async (event) => {
+      if (!drag) return;
+      const completed = drag;
+      drag = null;
+      slide.removeClass("is-panning");
+      if (slide.hasPointerCapture?.(event.pointerId)) slide.releasePointerCapture(event.pointerId);
+      if (!completed.moved) return;
+      slide.dataset.wasDragged = "true";
+      window.setTimeout(() => { slide.dataset.wasDragged = "false"; }, 0);
+      slide.addClass("is-user-positioned");
+      const positions = { ...(this.plugin.settings.heroImagePositions || {}) };
+      positions[item.path] = Number(currentPosition().toFixed(2));
+      this.plugin.settings.heroImagePositions = positions;
+      await this.plugin.saveSettings();
+    };
+
+    slide.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      drag = {
+        pointerId: event.pointerId,
+        startY: event.clientY,
+        startPosition: currentPosition(),
+        moved: false,
+      };
+      slide.addClass("is-panning");
+    });
+    slide.addEventListener("pointermove", (event) => {
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const delta = event.clientY - drag.startY;
+      if (!drag.moved && Math.abs(delta) > 4) {
+        drag.moved = true;
+        slide.setPointerCapture?.(event.pointerId);
+      }
+      if (!drag.moved) return;
+      event.preventDefault();
+      applyPosition(drag.startPosition + (delta / Math.max(slide.clientHeight, 1)) * 18);
+    });
+    slide.addEventListener("pointerup", finish);
+    slide.addEventListener("pointercancel", finish);
   }
 
   changeHero(direction) {
@@ -321,7 +427,7 @@ class AlexDeskView extends ItemView {
       el(detailHead, "strong", "", metric.detailTitle);
       el(detailHead, "span", "", `${metric.items.length} 项`);
       const list = el(detail, "div", "ad-source-list");
-      metric.items.slice(0, 10).forEach((item) => {
+      metric.items.forEach((item) => {
         const row = el(list, "button", "ad-source-row");
         const text = el(row, "span");
         el(text, "strong", "", item.label);
@@ -347,12 +453,14 @@ class AlexDeskView extends ItemView {
     const { head, body } = this.panel(parent, this.plugin.settings.todayTitle || "当下", "ad-today-panel");
     const badge = el(head, "span", "ad-day-badge", `今日 ${data.todayCharacters} 字`);
     badge.setAttribute("aria-label", "今日字数");
+    body.addClass("is-today-layout");
 
     if (!data.todayFile) {
       const empty = el(body, "button", "ad-today-empty");
       el(empty, "strong", "", "今天还是一张白纸");
       el(empty, "span", "", "写下第一句话，就已经是一次开始。");
       empty.addEventListener("click", () => this.plugin.openToday());
+      this.renderLifeProgress(body, data.lifeProgress);
       return;
     }
 
@@ -363,14 +471,9 @@ class AlexDeskView extends ItemView {
     now.setAttribute("tabindex", "0");
     const nowCopy = el(now, "span");
     el(nowCopy, "strong", "", data.todayFile.basename);
-    const excerptEl = el(nowCopy, "div", "ad-markdown-excerpt");
-    excerptEl.style.setProperty("--excerpt-lines", String(Math.max(2, Math.min(12, Number(this.plugin.settings.todayExcerptLines) || 5))));
-    this.renderMarkdownExcerpt(
-      excerptEl,
-      data.todayMarkdown,
-      data.todayFile.path,
-      Math.max(60, Math.min(500, Number(this.plugin.settings.todayExcerptCharacters) || 180)),
-    );
+    const excerptFrame = el(nowCopy, "div", "ad-markdown-frame");
+    const excerptEl = el(excerptFrame, "div", "ad-markdown-excerpt");
+    this.renderMarkdownExcerpt(excerptEl, data.todayMarkdown, data.todayFile.path);
     const arrow = el(now, "i");
     setIcon(arrow, "arrow-up-right");
     now.addEventListener("click", (event) => {
@@ -394,12 +497,14 @@ class AlexDeskView extends ItemView {
       });
     }
 
-    const relatedArea = el(body, "div", "ad-related-section");
-    const relatedHead = el(relatedArea, "div", "ad-subsection-title");
-    el(relatedHead, "span", "", "今日关联");
-    el(relatedHead, "i");
-    const related = el(relatedArea, "div", "ad-related-list");
+    this.renderLifeProgress(body, data.lifeProgress);
+
     if (data.todayRelated.length) {
+      const relatedArea = el(body, "div", "ad-related-section");
+      const relatedHead = el(relatedArea, "div", "ad-subsection-title");
+      el(relatedHead, "span", "", "今日关联");
+      el(relatedHead, "i");
+      const related = el(relatedArea, "div", "ad-related-list");
       data.todayRelated.slice(0, 4).forEach((file) => {
         const button = el(related, "button", "ad-related-item");
         const icon = el(button, "i");
@@ -407,9 +512,428 @@ class AlexDeskView extends ItemView {
         el(button, "span", "", file.basename);
         button.addEventListener("click", () => this.plugin.openFile(file));
       });
-    } else {
-      el(related, "p", "", "今天的记录尚未连接其他笔记。");
     }
+  }
+
+  renderLifeProgress(parent, data) {
+    const section = el(parent, "section", `ad-life-progress glass-surface ${data.hasBirthDate ? "" : "is-unset"}`);
+    const head = el(section, "header", "ad-life-head");
+    const identity = el(head, "div", "ad-life-identity");
+    const lifeMark = (this.plugin.settings.lifeProgressMark || "人").slice(0, 2);
+    const lifeOrb = el(identity, "span", "ad-life-orb", lifeMark);
+    lifeOrb.addClass(lifeMark.length === 1 ? "is-single" : "is-pair");
+    if (/^[a-z\d]{2}$/i.test(lifeMark)) lifeOrb.addClass("is-latin-pair");
+    const lifeMarkColor = String(this.plugin.settings.lifeProgressMarkColor || "").trim();
+    if (lifeMarkColor && CSS.supports("color", lifeMarkColor)) {
+      lifeOrb.style.setProperty("--ad-life-mark-color", lifeMarkColor);
+    }
+    const lifeMarkFont = String(this.plugin.settings.lifeProgressMarkFont || "PingFang SC").trim();
+    if (lifeMarkFont && CSS.supports("font-family", lifeMarkFont)) {
+      lifeOrb.style.setProperty("--ad-life-mark-font", lifeMarkFont);
+    }
+    const copy = el(identity, "div");
+    el(copy, "strong", "", this.plugin.settings.lifeProgressTitle || "人生进度");
+    const daysLine = el(copy, "span", "ad-life-days-line");
+    el(daysLine, "em", "", data.hasBirthDate ? "已经走过" : "记录跨度");
+    const daysSlot = el(daysLine, "b", "ad-life-days-slot");
+    let displayedLifeDays = data.hasBirthDate ? data.livedDays : data.journalSpanDays;
+    el(daysLine, "em", "", "天");
+    const digitModulo = (value) => ((value % 10) + 10) % 10;
+    const buildLifeDigits = (value) => {
+      daysSlot.empty();
+      String(value.toLocaleString()).split("").forEach((character) => {
+        if (!/\d/.test(character)) {
+          el(daysSlot, "i", "ad-life-digit-separator", character);
+          return;
+        }
+        const digit = Number(character);
+        const cell = el(daysSlot, "i", "ad-life-digit-cell");
+        cell.dataset.digit = String(digit);
+        cell._position = 20 + digit;
+        const reel = el(cell, "span", "ad-life-digit-reel");
+        for (let index = 0; index <= 40; index += 1) el(reel, "b", "", String(index % 10));
+        reel.style.transition = "none";
+        reel.style.transform = `translateY(${-cell._position * 1.28}em)`;
+        window.requestAnimationFrame(() => { reel.style.transition = ""; });
+      });
+    };
+    buildLifeDigits(displayedLifeDays);
+    const calendarJumpButton = el(head, "button", "ad-life-today-button is-visible");
+    const calendarJumpIcon = el(calendarJumpButton, "i");
+    setIcon(calendarJumpIcon, "calendar-days");
+    el(calendarJumpButton, "span", "", "日期");
+    calendarJumpButton.setAttribute("aria-label", "查看并跳转日期");
+    calendarJumpButton.setAttribute("aria-haspopup", "dialog");
+    calendarJumpButton.setAttribute("aria-expanded", "false");
+
+    const wheel = el(section, "div", "ad-life-wheel");
+    wheel.setAttribute("role", "listbox");
+    wheel.setAttribute("tabindex", "0");
+    wheel.setAttribute("aria-description", "使用滚轮或拖动回看过去日期");
+    el(wheel, "span", "ad-life-wheel-glow");
+    const dateTrigger = el(wheel, "button", "ad-life-selected-label", "今天");
+    const selectedLabel = dateTrigger;
+    dateTrigger.setAttribute("aria-description", "打开日期定位");
+    dateTrigger.setAttribute("aria-haspopup", "dialog");
+    dateTrigger.setAttribute("aria-expanded", "false");
+    const calendarLayer = document.body.createDiv({ cls: "ad-life-calendar-layer" });
+    calendarLayer.addClass(`is-${this.effectiveMode()}`);
+    this.calendarLayer = calendarLayer;
+    const appearance = getComputedStyle(this.contentEl);
+    ["--ad-bg", "--ad-card", "--ad-line", "--ad-accent", "--ad-text", "--ad-sub", "--ad-muted", "--ad-soft", "--ad-on-heat", "--ad-glass-strong"]
+      .forEach((property) => calendarLayer.style.setProperty(property, appearance.getPropertyValue(property)));
+    const calendar = el(calendarLayer, "div", "ad-life-calendar");
+    calendar.setAttribute("role", "dialog");
+    calendar.setAttribute("aria-label", "选择人生进度日期");
+    calendar.setAttribute("aria-hidden", "true");
+    const returnButton = el(wheel, "button", "ad-life-calendar-trigger");
+    for (let index = 0; index < 6; index += 1) {
+      const ring = el(returnButton, "span", "ad-life-magic-ring");
+      ring.style.setProperty("--ad-ring-size", `${16 + index * 5}px`);
+      ring.style.setProperty("--ad-ring-angle", `${index * 31}deg`);
+      ring.style.setProperty("--ad-ring-mix", `${56 - index * 5}%`);
+      ring.style.setProperty("--ad-ring-peak", String(.5 - index * .055));
+      ring.style.setProperty("--ad-ring-mid", String(.32 - index * .04));
+      ring.style.setProperty("--ad-ring-duration", `${4.15 + index * .28}s`);
+      ring.style.setProperty("--ad-ring-delay", `${index * -.61}s`);
+    }
+    returnButton.setAttribute("aria-label", "回到今天");
+    returnButton.disabled = true;
+
+    const slotCount = 11;
+    const centerSlot = Math.floor(slotCount / 2);
+    const slots = Array.from({ length: slotCount }, (_, index) => {
+      const button = el(wheel, "button", "ad-life-day");
+      button.setAttribute("role", "option");
+      el(button, "strong");
+      el(button, "span");
+      el(button, "i");
+      el(button, "b", "ad-life-dial-tick");
+      button.dataset.relative = String(index - centerSlot);
+      return button;
+    });
+
+    let position = 0;
+    let target = 0;
+    let selectedOffset = 0;
+    let lastFrame = performance.now();
+    let drag = null;
+    let dragMoved = false;
+    const dayWidth = 58;
+    const clamp = (value) => Math.max(0, Math.min(data.maxOffset, value));
+    const entryForOffset = (offset) => {
+      const key = window.moment().startOf("day").subtract(offset, "days").format("YYYY-MM-DD");
+      return { key, entry: data.noteDays.get(key), moment: window.moment(key, "YYYY-MM-DD") };
+    };
+    const updateLifeDays = (offset) => {
+      const nextValue = Math.max(0, (data.hasBirthDate ? data.livedDays : data.journalSpanDays) - offset);
+      if (nextValue === displayedLifeDays) return;
+      const previousText = displayedLifeDays.toLocaleString();
+      const nextText = nextValue.toLocaleString();
+      if (previousText.length !== nextText.length) {
+        displayedLifeDays = nextValue;
+        buildLifeDigits(nextValue);
+        return;
+      }
+      const direction = nextValue < displayedLifeDays ? -1 : 1;
+      const children = Array.from(daysSlot.children);
+      nextText.split("").forEach((character, index) => {
+        const cell = children[index];
+        if (!cell || !/\d/.test(character) || cell.dataset.digit === character) return;
+        const targetDigit = Number(character);
+        let nextPosition = Number(cell._position);
+        do nextPosition += direction; while (digitModulo(nextPosition) !== targetDigit);
+        cell._position = nextPosition;
+        cell.dataset.digit = character;
+        const reel = cell.querySelector(".ad-life-digit-reel");
+        const inertiaDelay = Math.max(0, nextText.length - 1 - index) * 18;
+        reel.style.transitionDelay = `${inertiaDelay}ms`;
+        reel.style.transform = `translateY(${-nextPosition * 1.28}em)`;
+        window.clearTimeout(cell._rebaseTimer);
+        cell._rebaseTimer = window.setTimeout(() => {
+          if (cell._position >= 10 && cell._position <= 30) return;
+          const rebased = 20 + Number(cell.dataset.digit);
+          reel.style.transition = "none";
+          cell._position = rebased;
+          reel.style.transform = `translateY(${-rebased * 1.28}em)`;
+          window.requestAnimationFrame(() => { reel.style.transition = ""; });
+        }, 520 + inertiaDelay);
+      });
+      displayedLifeDays = nextValue;
+    };
+
+    const updateSelected = (offset, withSound = true) => {
+      const next = Math.round(clamp(offset));
+      if (next === selectedOffset && selectedLabel.textContent) return;
+      selectedOffset = next;
+      const { moment } = entryForOffset(next);
+      selectedLabel.setText(next === 0 ? "今天" : moment.format("M月D日"));
+      updateLifeDays(next);
+      returnButton.disabled = next === 0;
+      returnButton.toggleClass("is-available", next > 0);
+      if (withSound) this.playWheelTick();
+    };
+
+    const layoutDays = (value) => {
+      const base = Math.floor(value);
+      const fraction = value - base;
+      slots.forEach((button, index) => {
+        const relative = index - centerSlot;
+        const offset = base + relative;
+        const distance = relative - fraction;
+        if (offset < -centerSlot || offset > data.maxOffset) {
+          button.hidden = true;
+          return;
+        }
+        button.hidden = false;
+        const { entry, moment } = entryForOffset(offset);
+        if (button.dataset.offset !== String(offset)) {
+          button.dataset.offset = String(offset);
+          button.querySelector("strong").setText(String(moment.date()));
+          button.querySelector("span").setText(moment.format("M月"));
+          button.setAttribute("aria-label", `${moment.format("YYYY年M月D日")}${entry ? "，有日记" : ""}`);
+        }
+        button.toggleClass("has-note", Boolean(entry));
+        button.toggleClass("is-future", offset < 0);
+        button.toggleClass("is-selected", offset === Math.round(value));
+        button.setAttribute("aria-selected", String(offset === Math.round(value)));
+        const x = distance * dayWidth;
+        const y = Math.pow(Math.abs(distance), 1.5) * 2.05;
+        const rotation = distance * 5.1;
+        const opacity = Math.max(.12, 1 - Math.abs(distance) * .13);
+        const blur = Math.min(Math.abs(distance) * .46, 2.8);
+        const focus = Math.exp(-Math.pow(distance * .88, 2));
+        const tick = button.querySelector(".ad-life-dial-tick");
+        tick.style.height = `${(7 + focus * 25).toFixed(2)}px`;
+        tick.style.opacity = String(.22 + focus * .78);
+        tick.style.filter = `blur(${Math.min(Math.abs(distance) * .7, 2.8).toFixed(2)}px)`;
+        tick.style.transform = `translateX(-50%) rotate(${(distance * 3.2).toFixed(2)}deg)`;
+        button.style.transform = `translate(calc(-50% + ${x.toFixed(2)}px), calc(-50% + ${y.toFixed(2)}px)) rotate(${rotation.toFixed(2)}deg)`;
+        button.style.opacity = String(opacity);
+        button.style.filter = `blur(${blur.toFixed(2)}px)`;
+      });
+    };
+
+    const runFrame = (now) => {
+      const delta = Math.min((now - lastFrame) / 1000, .05);
+      lastFrame = now;
+      const smoothing = 1 - Math.exp(-delta / .16);
+      position += (target - position) * smoothing;
+      const settled = Math.abs(target - position) < .001;
+      if (settled) position = target;
+      layoutDays(position);
+      updateSelected(position);
+      this.lifeWheelFrame = settled ? 0 : window.requestAnimationFrame(runFrame);
+    };
+    const startLoop = () => {
+      window.cancelAnimationFrame(this.lifeWheelFrame);
+      lastFrame = performance.now();
+      this.lifeWheelFrame = window.requestAnimationFrame(runFrame);
+    };
+    const applyTarget = (value, snap = false) => {
+      wheel.removeClass("is-returning");
+      returnButton.removeClass("is-returning");
+      if (!snap && value < 0) target = Math.max(-.42, value * .18);
+      else target = clamp(snap ? Math.round(value) : value);
+      startLoop();
+    };
+
+    const returnToToday = () => {
+      const startPosition = Math.max(0, position);
+      if (startPosition < .001) return;
+      window.cancelAnimationFrame(this.lifeWheelFrame);
+      window.clearTimeout(this.lifeWheelTimer);
+      target = 0;
+      const startedAt = performance.now();
+      const duration = Math.min(1650, 760 + Math.log1p(startPosition) * 115);
+      wheel.addClass("is-returning");
+      returnButton.addClass("is-returning");
+      const returnFrame = (now) => {
+        const progress = Math.min(1, (now - startedAt) / duration);
+        const eased = 1 - Math.pow(1 - progress, 4);
+        position = startPosition * (1 - eased);
+        layoutDays(position);
+        updateSelected(position);
+        if (progress < 1) {
+          this.lifeWheelFrame = window.requestAnimationFrame(returnFrame);
+          return;
+        }
+        position = 0;
+        target = 0;
+        layoutDays(0);
+        updateSelected(0, false);
+        wheel.removeClass("is-returning");
+        returnButton.removeClass("is-returning");
+        this.lifeWheelFrame = 0;
+      };
+      this.lifeWheelFrame = window.requestAnimationFrame(returnFrame);
+    };
+    returnButton.addEventListener("click", returnToToday);
+
+    const todayMoment = window.moment().startOf("day");
+    const minimumMoment = todayMoment.clone().subtract(data.maxOffset, "days");
+    let pickerMoment = todayMoment.clone();
+    const closeCalendar = () => {
+      calendarLayer.removeClass("is-open");
+      calendar.removeClass("is-open");
+      calendar.setAttribute("aria-hidden", "true");
+      dateTrigger.setAttribute("aria-expanded", "false");
+      calendarJumpButton.setAttribute("aria-expanded", "false");
+      if (this.calendarOutsideHandler) document.removeEventListener("pointerdown", this.calendarOutsideHandler, true);
+      this.calendarOutsideHandler = null;
+    };
+    const selectCalendarDate = (moment) => {
+      pickerMoment = moment.clone().startOf("day");
+      const offset = todayMoment.diff(pickerMoment, "days");
+      applyTarget(offset, true);
+      closeCalendar();
+    };
+    const renderCalendar = () => {
+      calendar.empty();
+      const calendarHead = el(calendar, "header", "ad-life-calendar-head");
+      const previous = el(calendarHead, "button", "ad-life-calendar-nav");
+      setIcon(previous, "chevron-left");
+      const selects = el(calendarHead, "div", "ad-life-calendar-selects");
+      const yearSelect = el(selects, "select");
+      for (let year = todayMoment.year(); year >= minimumMoment.year(); year -= 1) {
+        const option = yearSelect.createEl("option", { text: `${year}年` });
+        option.value = String(year);
+        option.selected = year === pickerMoment.year();
+      }
+      const monthSelect = el(selects, "select");
+      for (let month = 0; month < 12; month += 1) {
+        const option = monthSelect.createEl("option", { text: `${month + 1}月` });
+        option.value = String(month);
+        option.selected = month === pickerMoment.month();
+      }
+      const next = el(calendarHead, "button", "ad-life-calendar-nav");
+      setIcon(next, "chevron-right");
+      const weekdays = el(calendar, "div", "ad-life-calendar-weekdays");
+      "一二三四五六日".split("").forEach((day) => el(weekdays, "span", "", day));
+      const days = el(calendar, "div", "ad-life-calendar-days");
+      const start = pickerMoment.clone().startOf("month").startOf("isoWeek");
+      for (let index = 0; index < 42; index += 1) {
+        const dayMoment = start.clone().add(index, "days");
+        const disabled = dayMoment.isAfter(todayMoment, "day") || dayMoment.isBefore(minimumMoment, "day");
+        const button = el(days, "button", "ad-life-calendar-day", String(dayMoment.date()));
+        button.toggleClass("is-outside", dayMoment.month() !== pickerMoment.month());
+        button.toggleClass("is-selected", dayMoment.isSame(pickerMoment, "day"));
+        button.toggleClass("has-note", Boolean(data.noteDays.get(dayMoment.format("YYYY-MM-DD"))));
+        button.disabled = disabled;
+        if (!disabled) button.addEventListener("click", () => selectCalendarDate(dayMoment));
+      }
+      const changeMonth = (delta) => {
+        const candidate = pickerMoment.clone().add(delta, "month").startOf("month");
+        if (candidate.isAfter(todayMoment, "month") || candidate.isBefore(minimumMoment, "month")) return;
+        pickerMoment = candidate;
+        renderCalendar();
+      };
+      previous.addEventListener("click", () => changeMonth(-1));
+      next.addEventListener("click", () => changeMonth(1));
+      yearSelect.addEventListener("change", () => {
+        pickerMoment.date(1).year(Number(yearSelect.value));
+        if (pickerMoment.isAfter(todayMoment, "day")) pickerMoment = todayMoment.clone();
+        if (pickerMoment.isBefore(minimumMoment, "day")) pickerMoment = minimumMoment.clone();
+        renderCalendar();
+      });
+      monthSelect.addEventListener("change", () => {
+        pickerMoment.date(1).month(Number(monthSelect.value));
+        if (pickerMoment.isAfter(todayMoment, "day")) pickerMoment = todayMoment.clone();
+        if (pickerMoment.isBefore(minimumMoment, "day")) pickerMoment = minimumMoment.clone();
+        renderCalendar();
+      });
+    };
+    dateTrigger.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (calendar.hasClass("is-open")) {
+        closeCalendar();
+        return;
+      }
+      pickerMoment = entryForOffset(selectedOffset).moment.clone();
+      renderCalendar();
+      calendarLayer.addClass("is-open");
+      calendar.addClass("is-open");
+      calendar.setAttribute("aria-hidden", "false");
+      dateTrigger.setAttribute("aria-expanded", "true");
+      calendarJumpButton.setAttribute("aria-expanded", "true");
+      this.calendarOutsideHandler = (outsideEvent) => {
+        if (calendar.contains(outsideEvent.target) || dateTrigger.contains(outsideEvent.target) || calendarJumpButton.contains(outsideEvent.target)) return;
+        closeCalendar();
+      };
+      window.setTimeout(() => {
+        if (this.calendarOutsideHandler) document.addEventListener("pointerdown", this.calendarOutsideHandler, true);
+      }, 0);
+    });
+    dateTrigger.addEventListener("pointerdown", (event) => event.stopPropagation());
+    returnButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+    calendarJumpButton.addEventListener("pointerdown", (event) => event.stopPropagation());
+    calendarJumpButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      dateTrigger.click();
+    });
+
+    slots.forEach((button) => {
+      button.addEventListener("click", () => {
+        if (dragMoved) return;
+        const offset = Number(button.dataset.offset);
+        if (!Number.isFinite(offset)) return;
+        if (offset < 0) {
+          applyTarget(-.36, false);
+          window.clearTimeout(this.lifeWheelTimer);
+          this.lifeWheelTimer = window.setTimeout(() => applyTarget(0, true), 150);
+          return;
+        }
+        const { entry } = entryForOffset(offset);
+        if (offset === selectedOffset && entry) this.plugin.openFile(entry.file);
+        else applyTarget(offset, true);
+      });
+    });
+    wheel.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      const delta = event.deltaMode === 1 ? event.deltaY * 24 : event.deltaY;
+      const step = Math.max(-1, Math.min(1, delta / dayWidth));
+      applyTarget(target + step, false);
+      window.clearTimeout(this.lifeWheelTimer);
+      this.lifeWheelTimer = window.setTimeout(() => applyTarget(target, true), 140);
+    }, { passive: false });
+    wheel.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      drag = { id: event.pointerId, x: event.clientX, start: target };
+      dragMoved = false;
+      wheel.addClass("is-dragging");
+    });
+    wheel.addEventListener("pointermove", (event) => {
+      if (!drag || drag.id !== event.pointerId) return;
+      const delta = event.clientX - drag.x;
+      if (!dragMoved && Math.abs(delta) > 4) {
+        dragMoved = true;
+        wheel.setPointerCapture?.(event.pointerId);
+      }
+      if (dragMoved) applyTarget(drag.start - delta / dayWidth, false);
+    });
+    const finishDrag = (event) => {
+      if (!drag) return;
+      drag = null;
+      wheel.removeClass("is-dragging");
+      if (wheel.hasPointerCapture?.(event.pointerId)) wheel.releasePointerCapture(event.pointerId);
+      if (dragMoved) applyTarget(target, true);
+      window.setTimeout(() => { dragMoved = false; }, 0);
+    };
+    wheel.addEventListener("pointerup", finishDrag);
+    wheel.addEventListener("pointercancel", finishDrag);
+    wheel.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Enter", " "].includes(event.key)) return;
+      event.preventDefault();
+      if (event.key === "Enter" || event.key === " ") {
+        const { entry } = entryForOffset(selectedOffset);
+        if (entry) this.plugin.openFile(entry.file);
+        return;
+      }
+      applyTarget(Math.round(target) + (event.key === "ArrowLeft" ? 1 : -1), true);
+    });
+
+    updateSelected(0, false);
+    layoutDays(0);
   }
 
   renderHeatmap(parent, data) {
@@ -466,20 +990,102 @@ class AlexDeskView extends ItemView {
       best.disabled = true;
     }
 
-    const recent = el(body, "div", "ad-heat-recent");
-    const recentTitle = el(recent, "div", "ad-subsection-title");
-    el(recentTitle, "span", "", "最近写作");
-    el(recentTitle, "i");
-    const recentList = el(recent, "div", "ad-heat-recent-list");
-    data.heatmap.recentDays.forEach((day) => {
-      const row = el(recentList, "button");
-      el(row, "strong", "", day.label);
-      el(row, "span", "", `${compactNumber(day.characters)} 字`);
-      row.addEventListener("click", () => this.plugin.openFile(day.dailyFile));
+    this.renderNoteConnections(body, data.noteConnections);
+    this.renderTaskQueue(body, data.taskQueue);
+  }
+
+  renderNoteConnections(parent, data) {
+    const section = el(parent, "div", "ad-note-connections");
+    const title = el(section, "div", "ad-subsection-title");
+    el(title, "span", "", "连接体检");
+    el(title, "i");
+    el(title, "small", "ad-connection-hint", "总关联＝被引用＋主动引用");
+    const grid = el(section, "div", "ad-connection-grid");
+    data.items.forEach((item) => {
+      const card = el(grid, "button", `ad-connection-card ${item.file ? "" : "is-empty"}`);
+      const icon = el(card, "i");
+      setIcon(icon, item.icon);
+      const copy = el(card, "span");
+      el(copy, "small", "", item.label);
+      el(copy, "strong", "", item.value);
+      el(copy, "em", "", item.detail);
+      const arrow = el(card, "b");
+      if (item.file) {
+        setIcon(arrow, "arrow-up-right");
+        card.setAttribute("aria-label", `${item.label}，${item.value}：打开 ${item.file.basename}`);
+        card.addEventListener("click", () => this.plugin.openFile(item.file));
+      } else {
+        setIcon(arrow, "check");
+        card.disabled = true;
+      }
     });
   }
 
-  async renderMarkdownExcerpt(container, markdown, sourcePath, limit) {
+  renderTaskQueue(parent, tasks) {
+    const section = el(parent, "section", "ad-task-queue");
+    const head = el(section, "header", "ad-subsection-title");
+    el(head, "span", "", "待办拾取");
+    el(head, "i");
+    el(head, "small", "ad-task-queue-count", `${tasks.length} 项`);
+    const list = el(section, "div", "ad-task-queue-list");
+    if (!tasks.length) {
+      const empty = el(list, "div", "ad-task-queue-empty");
+      const mark = el(empty, "i");
+      setIcon(mark, "check-check");
+      el(empty, "span", "", "当前没有散落的未完成事项");
+      return;
+    }
+    tasks.forEach((task) => {
+      const row = el(list, "button", "ad-task-queue-item");
+      el(row, "i");
+      const copy = el(row, "span");
+      el(copy, "strong", "", task.text);
+      el(copy, "small", "", task.file.basename);
+      const arrow = el(row, "b");
+      setIcon(arrow, "arrow-up-right");
+      row.addEventListener("click", () => this.plugin.openFile(task.file));
+    });
+  }
+
+  playWheelTick() {
+    if (this.plugin.settings.rediscoverySoundEnabled === false) return;
+    const now = performance.now();
+    if (now - this.wheelLastTick < 70) return;
+    this.wheelLastTick = now;
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContext) return;
+    if (!this.wheelAudioContext || this.wheelAudioContext.state === "closed") {
+      this.wheelAudioContext = new AudioContext();
+    }
+    const context = this.wheelAudioContext;
+    context.resume?.().catch(() => {});
+    const duration = .026;
+    const length = Math.max(1, Math.floor(context.sampleRate * duration));
+    const buffer = context.createBuffer(1, length, context.sampleRate);
+    const channel = buffer.getChannelData(0);
+    for (let index = 0; index < length; index += 1) {
+      const envelope = Math.pow(1 - index / length, 4);
+      channel[index] = (Math.random() * 2 - 1) * envelope;
+    }
+    const source = context.createBufferSource();
+    const filter = context.createBiquadFilter();
+    const gain = context.createGain();
+    filter.type = "bandpass";
+    filter.frequency.value = 1500;
+    filter.Q.value = .7;
+    const rawVolume = Number(this.plugin.settings.rediscoverySoundVolume);
+    const volume = Number.isFinite(rawVolume) ? Math.max(0, Math.min(1, rawVolume)) : .22;
+    gain.gain.setValueAtTime(volume * .11, context.currentTime);
+    gain.gain.exponentialRampToValueAtTime(.0001, context.currentTime + duration);
+    source.buffer = buffer;
+    source.connect(filter);
+    filter.connect(gain);
+    gain.connect(context.destination);
+    source.start();
+    source.stop(context.currentTime + duration);
+  }
+
+  async renderMarkdownExcerpt(container, markdown, sourcePath) {
     const cleaned = String(markdown || "")
       .replace(/^---[\s\S]*?---\s*/m, "")
       .replace(/^#\s+\d{4}年\d{1,2}月\d{1,2}日\s*$/m, "")
@@ -490,29 +1096,9 @@ class AlexDeskView extends ItemView {
     }
     try {
       await MarkdownRenderer.render(this.app, cleaned, container, sourcePath, this);
-      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-      const nodes = [];
-      while (walker.nextNode()) nodes.push(walker.currentNode);
-      let remaining = limit;
-      let truncated = false;
-      nodes.forEach((node) => {
-        if (truncated) {
-          node.textContent = "";
-          return;
-        }
-        const value = node.textContent || "";
-        if (value.length <= remaining) {
-          remaining -= value.length;
-          return;
-        }
-        node.textContent = `${value.slice(0, Math.max(0, remaining)).trimEnd()}…`;
-        remaining = 0;
-        truncated = true;
-      });
-      container.toggleClass("is-truncated", truncated);
     } catch (error) {
       console.error("[Alex Desk] Markdown render failed", error);
-      container.setText(excerpt(markdown, limit));
+      container.setText(plainText(markdown));
     }
   }
 }
@@ -594,6 +1180,29 @@ class AlexDeskSettingTab extends PluginSettingTab {
         }));
 
     new Setting(containerEl)
+      .setName("封面自然游移")
+      .setDesc("图片仅做缓慢的上下取景，不再自动放大缩小。手动拖动后会记住该图片的位置。")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.heroAutoPan !== false)
+        .onChange(async (value) => {
+          this.plugin.settings.heroAutoPan = value;
+          await this.plugin.saveSettings();
+          this.plugin.refreshViews();
+        }));
+
+    new Setting(containerEl)
+      .setName("重置封面取景")
+      .setDesc("清除所有图片的手动上下位置，恢复自然游移。")
+      .addButton((button) => button
+        .setButtonText("恢复默认")
+        .onClick(async () => {
+          this.plugin.settings.heroImagePositions = {};
+          await this.plugin.saveSettings();
+          this.plugin.refreshViews();
+          new Notice("封面取景位置已重置。");
+        }));
+
+    new Setting(containerEl)
       .setName("昼夜模式")
       .setDesc("自动模式跟随 Obsidian。")
       .addDropdown((dropdown) => dropdown
@@ -628,30 +1237,41 @@ class AlexDeskSettingTab extends PluginSettingTab {
       "insightMetrics",
     );
     this.text("当下模块标题", "例如：当下、今日记录、此刻。", "todayTitle");
+    this.text("人生模块标题", "显示在日期回看功能上方，例如：人生进度、时间漫游。", "lifeProgressTitle");
+    this.text("人生模块圆形标记", "显示 1–2 个字，例如：人、忆、我。", "lifeProgressMark");
     new Setting(containerEl)
-      .setName("当下摘要行数")
-      .setDesc("控制当日笔记摘要显示 2–12 行。")
-      .addSlider((slider) => slider
-        .setLimits(2, 12, 1)
-        .setDynamicTooltip()
-        .setValue(Number(this.plugin.settings.todayExcerptLines) || 5)
+      .setName("圆形标记文字颜色")
+      .setDesc("只改变圆形标记内的文字；点击右侧重置按钮可恢复跟随当前主题。")
+      .addColorPicker((picker) => picker
+        .setValue(this.plugin.settings.lifeProgressMarkColor || "#2f7187")
         .onChange(async (value) => {
-          this.plugin.settings.todayExcerptLines = value;
+          this.plugin.settings.lifeProgressMarkColor = value;
           await this.plugin.saveSettings();
           this.plugin.refreshViews();
-        }));
-    new Setting(containerEl)
-      .setName("当下摘要字数")
-      .setDesc("超过设定字数后自动使用省略号，范围 60–500 字。")
-      .addSlider((slider) => slider
-        .setLimits(60, 500, 20)
-        .setDynamicTooltip()
-        .setValue(Number(this.plugin.settings.todayExcerptCharacters) || 180)
-        .onChange(async (value) => {
-          this.plugin.settings.todayExcerptCharacters = value;
+        }))
+      .addExtraButton((button) => button
+        .setIcon("rotate-ccw")
+        .setTooltip("恢复跟随主题")
+        .onClick(async () => {
+          this.plugin.settings.lifeProgressMarkColor = "";
           await this.plugin.saveSettings();
           this.plugin.refreshViews();
+          this.display();
         }));
+    this.text("圆形标记字体", "填写本机已安装字体的名称；默认使用苹方粗体，留空也会回到苹方。", "lifeProgressMarkFont");
+    new Setting(containerEl)
+      .setName("出生日期")
+      .setDesc("用于显示已经走过的天数；只保存在本地插件设置中。")
+      .addText((input) => {
+        input.inputEl.type = "date";
+        input
+          .setValue(this.plugin.settings.birthDate || "")
+          .onChange(async (value) => {
+            this.plugin.settings.birthDate = value;
+            await this.plugin.saveSettings();
+            this.plugin.refreshViews();
+          });
+      });
     this.text("热力图标题", "例如：文字热力图、写作足迹、日记沉淀。", "heatmapTitle");
     new Setting(containerEl)
       .setName("热力图周数")
@@ -664,6 +1284,28 @@ class AlexDeskSettingTab extends PluginSettingTab {
           this.plugin.settings.heatmapWeeks = value;
           await this.plugin.saveSettings();
           this.plugin.refreshViews();
+        }));
+    new Setting(containerEl)
+      .setName("日期滚轮声音")
+      .setDesc("回看过去日期时播放轻微的本地刻度声。")
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.rediscoverySoundEnabled !== false)
+        .onChange(async (value) => {
+          this.plugin.settings.rediscoverySoundEnabled = value;
+          await this.plugin.saveSettings();
+        }));
+    new Setting(containerEl)
+      .setName("滚轮声音音量")
+      .setDesc("声音只在操作日期滚轮时播放。")
+      .addSlider((slider) => slider
+        .setLimits(0, 0.6, 0.02)
+        .setDynamicTooltip()
+        .setValue(Number.isFinite(Number(this.plugin.settings.rediscoverySoundVolume))
+          ? Number(this.plugin.settings.rediscoverySoundVolume)
+          : .22)
+        .onChange(async (value) => {
+          this.plugin.settings.rediscoverySoundVolume = value;
+          await this.plugin.saveSettings();
         }));
     this.text("今日随笔文件夹", "", "dailyFolder");
     this.text("知识素材文件夹", "", "clippingsFolder");
@@ -767,6 +1409,7 @@ class AlexDeskPlugin extends Plugin {
           dateMoment = basenameDate ? window.moment(basenameDate, "YYYY-MM-DD") : window.moment(file.stat.ctime);
         }
         return {
+          path: file.path,
           name: file.basename,
           url: this.app.vault.getResourcePath(file),
           noteFile: noteEntry?.file || null,
@@ -805,6 +1448,22 @@ class AlexDeskPlugin extends Plugin {
       };
     }));
     const dailyMap = new Map(dailyEntries.filter((entry) => entry.key).map((entry) => [entry.key, entry]));
+    const datedDailyEntries = dailyEntries.filter((entry) => entry.key).sort((a, b) => a.key.localeCompare(b.key));
+    const earliestDailyMoment = datedDailyEntries.length
+      ? window.moment(datedDailyEntries[0].key, "YYYY-MM-DD", true)
+      : now.clone().startOf("day");
+    const configuredBirth = window.moment(String(this.settings.birthDate || ""), "YYYY-MM-DD", true);
+    const hasBirthDate = configuredBirth.isValid() && !configuredBirth.isAfter(now, "day");
+    const lifeStart = hasBirthDate ? configuredBirth.clone().startOf("day") : earliestDailyMoment.clone().startOf("day");
+    const livedDays = Math.max(0, now.clone().startOf("day").diff(lifeStart, "days"));
+    const journalSpanDays = Math.max(1, now.clone().startOf("day").diff(earliestDailyMoment, "days") + 1);
+    const lifeProgress = {
+      hasBirthDate,
+      livedDays,
+      journalSpanDays,
+      maxOffset: hasBirthDate ? Math.max(1, livedDays) : Math.max(365, journalSpanDays - 1),
+      noteDays: dailyMap,
+    };
     const currentMonthDaily = dailyEntries.filter((entry) => entry.key.startsWith(currentMonthKey) && entry.characters);
     const heatmapWeeks = Math.max(12, Math.min(52, Number(this.settings.heatmapWeeks) || 26));
     const heatmapStart = now.clone().startOf("isoWeek").subtract(heatmapWeeks - 1, "weeks");
@@ -854,6 +1513,52 @@ class AlexDeskPlugin extends Plugin {
     });
     const byModified = [...allEntries].sort((a, b) => b.file.stat.mtime - a.file.stat.mtime);
     const byCharacters = [...allEntries].sort((a, b) => b.characters - a.characters);
+    const resolvedLinks = this.app.metadataCache.resolvedLinks || {};
+    const incomingLinks = new Map(allFiles.map((file) => [file.path, 0]));
+    const connectionEntries = allEntries.map((entry) => {
+      const targets = resolvedLinks[entry.file.path] || {};
+      const outgoing = Object.values(targets).reduce((sum, count) => sum + Number(count || 0), 0);
+      Object.entries(targets).forEach(([targetPath, count]) => {
+        if (incomingLinks.has(targetPath)) incomingLinks.set(targetPath, incomingLinks.get(targetPath) + Number(count || 0));
+      });
+      return { ...entry, outgoing };
+    });
+    connectionEntries.forEach((entry) => { entry.incoming = incomingLinks.get(entry.file.path) || 0; });
+    const connected = [...connectionEntries].sort((a, b) =>
+      (b.incoming + b.outgoing) - (a.incoming + a.outgoing) || b.file.stat.mtime - a.file.stat.mtime);
+    const extending = [...connectionEntries].sort((a, b) => b.outgoing - a.outgoing || b.file.stat.mtime - a.file.stat.mtime);
+    const hub = connected.find((entry) => entry.incoming + entry.outgoing > 0) || null;
+    const outward = extending.find((entry) => entry.outgoing > 0) || null;
+    const noteConnections = {
+      items: [
+        {
+          icon: "network",
+          label: "总关联最多",
+          value: hub ? `${hub.incoming + hub.outgoing} 条` : "暂无",
+          detail: hub?.file.basename || "还没有形成双向链接",
+          file: hub?.file || null,
+        },
+        {
+          icon: "git-branch",
+          label: "主动引用最多",
+          value: outward ? `${outward.outgoing} 条` : "暂无",
+          detail: outward?.file.basename || "笔记中还没有链接",
+          file: outward?.file || null,
+        },
+      ],
+    };
+    const taskQueue = allEntries
+      .filter((entry) => entry.file.path !== todayFile?.path)
+      .flatMap((entry) => String(entry.source || "")
+        .split(/\r?\n/)
+        .map((line) => line.match(/^\s*[-*]\s+\[ \]\s+(.+)$/i))
+        .filter(Boolean)
+        .map((match) => ({
+          file: entry.file,
+          text: excerpt(match[1], 110),
+          modified: entry.file.stat.mtime,
+        })))
+      .sort((a, b) => b.modified - a.modified);
     const monthCharacters = currentMonthDaily.reduce((sum, entry) => sum + entry.characters, 0);
     const todayCharacters = countCharacters(todaySource);
     const insightMetrics = {
@@ -915,17 +1620,16 @@ class AlexDeskPlugin extends Plugin {
       heroImages: this.resolveHeroImages(allEntries),
       todayFile,
       todayMarkdown: todaySource,
-      todayExcerpt: excerpt(
-        todaySource,
-        Math.max(60, Math.min(500, Number(this.settings.todayExcerptCharacters) || 180)),
-      ),
       todayCharacters,
       todayTasks: parseTasks(todaySource),
       todayRelated,
+      lifeProgress,
       totalNotes: allFiles.length,
       totalCharacters,
       monthUpdates,
       insightMetrics,
+      noteConnections,
+      taskQueue,
       heatmap: {
         weeks: heatmapWeeks,
         days: heatmapDays,
@@ -936,7 +1640,6 @@ class AlexDeskPlugin extends Plugin {
           ? Math.round(heatmapActive.reduce((sum, day) => sum + day.characters, 0) / heatmapActive.length)
           : 0,
         bestDay: bestHeatmapDay,
-        recentDays: [...heatmapActive].reverse().slice(0, 4),
       },
     };
   }
