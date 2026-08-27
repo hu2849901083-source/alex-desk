@@ -5,3 +5,8 @@ Thumbs.db
 .idea/
 .vscode/
 release-staging/
+node_modules/
+dist/
+build/
+/audio-meter.ps1
+/elastic-mesh.js

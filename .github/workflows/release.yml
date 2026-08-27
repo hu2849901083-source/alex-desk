@@ -1,0 +1,52 @@
+name: 发布社区插件
+
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: 安装锁定依赖
+        run: npm ci
+      - name: 校验标签与清单版本
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          version="$(node -p "require('./manifest.json').version")"
+          test "$tag" = "$version" || { echo "标签 $tag 与 manifest 版本 $version 不一致"; exit 1; }
+      - name: 构建并检查
+        run: |
+          npm run build
+          npm run check
+      - name: 生成构建证明
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+      - name: 创建草稿 Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" \
+            --title "$tag" \
+            --draft \
+            --notes-file RELEASE_NOTES.md \
+            main.js manifest.json styles.css
