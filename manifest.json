@@ -1,9 +1,9 @@
 {
   "id": "alex-desk",
-  "name": "Alex Desk",
-  "version": "1.10.13",
+  "name": "每日专注主页",
+  "version": "1.10.21",
   "minAppVersion": "1.7.2",
-  "description": "A restrained, attention-first home dashboard for Obsidian.",
+  "description": "中文本地主页，汇总每日笔记、Markdown 待办、写作字数、热力图与人生日期回看.",
   "author": "Alex",
-  "isDesktopOnly": false
+  "isDesktopOnly": true
 }

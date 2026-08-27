@@ -1,0 +1,39 @@
+name: 问题报告
+description: 报告可以稳定复现的错误
+title: "[问题] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: 请勿在公开 Issue 中粘贴私人笔记、完整本地路径或安全漏洞细节。
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      placeholder: 例如 1.10.21
+    validations:
+      required: true
+  - type: input
+    id: obsidian-version
+    attributes:
+      label: Obsidian 与操作系统版本
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请使用不包含隐私信息的最小示例。
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 期望结果与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 错误信息或截图
+      description: 提交前请删除私人文件名和路径。

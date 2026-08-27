@@ -1,0 +1,27 @@
+{
+  "name": "alex-desk",
+  "version": "1.10.21",
+  "private": true,
+  "description": "每日专注主页社区插件构建",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hu2849901083-source/alex-desk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hu2849901083-source/alex-desk/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "check": "node --check main.js"
+  },
+  "dependencies": {
+    "ogl": "^1.0.11"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}
